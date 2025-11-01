@@ -1,0 +1,28 @@
+[Unit]
+Description=CQ-20B Bluetooth Foot Controller Bridge
+Documentation=https://github.com/yourusername/cq-bluetooth-controller
+After=network.target bluetooth.target
+Wants=bluetooth.target
+
+[Service]
+Type=simple
+User=btafoya
+Group=btafoya
+WorkingDirectory=/home/btafoya/cq-bluetooth-controller
+ExecStart=/usr/bin/python3 /home/btafoya/cq-bluetooth-controller/cq_foot_controller.py /home/btafoya/cq-bluetooth-controller/config.yaml
+
+# Restart policy
+Restart=always
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cq-footcontroller
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,127 @@
+# ============================================
+# CQ-20B Foot Controller Configuration
+# ============================================
+# Edit this file to customize your setup
+# Restart service after changes: sudo systemctl restart cq-footcontroller
+
+# Network Configuration
+network:
+  mixer_ip: "192.168.1.100"  # ⚠️ CHANGE THIS to your CQ-20B IP address!
+  mixer_port: 51325          # Standard MIDI over TCP port for Allen & Heath
+  keepalive_interval: 0.3    # Send keepalive every 300ms
+  connection_timeout: 5.0    # Connection timeout in seconds
+  reconnect_delay: 2.0       # Wait 2s before reconnecting after failure
+
+# Bluetooth MIDI Configuration
+bluetooth:
+  # Auto-detect M-Vave by these name patterns
+  device_name_patterns:
+    - "Chocolate"
+    - "M-VAVE"
+    - "M-vave"
+    - "Bluetooth"
+  # Leave empty to auto-detect, or specify exact MIDI port name
+  midi_port: ""
+
+# Button Mapping - M-Vave Chocolate Plus
+# ⚠️ IMPORTANT: Run ./test_midi.py to find your exact CC numbers!
+button_mapping:
+  button_a:
+    cc_number: 20
+    description: "USB Recording Start/Stop"
+  button_b:
+    cc_number: 21
+    description: "AUX Monitor Level Toggle"
+  button_c:
+    cc_number: 22
+    description: "FX Mute Group Toggle"
+  button_d:
+    cc_number: 23
+    description: "Break Mode (Scene Switch)"
+
+# NRPN Addresses for CQ-20B Controls
+# ✅ Values extracted from CQ MIDI Protocol V1.2 PDF
+# Source: https://www.allen-heath.com/content/uploads/2024/06/CQ_MIDI_Protocol_V1_2_0_iss2.pdf
+nrpn_addresses:
+  recording:
+    # Recording is controlled via Soft Key, not NRPN
+    # Use Note On/Off messages: Note 0x30 (C3) = Soft Key #1
+    soft_key_note: 0x30  # Soft Key #1 typically assigned to recording
+    description: "USB/SD Recording Control (Soft Key)"
+
+  mute_group_1:
+    msb: 0x04  # ✅ From PDF: MGRP1
+    lsb: 0x00
+    description: "Mute Group 1 - VOCALS"
+
+  mute_group_2:
+    msb: 0x04  # ✅ From PDF: MGRP2
+    lsb: 0x01
+    description: "Mute Group 2 - INSTRUMENTS"
+
+  mute_group_3:
+    msb: 0x04  # ✅ From PDF: MGRP3
+    lsb: 0x02
+    description: "Mute Group 3 - BREAK MUSIC (ST2 In)"
+
+  mute_group_4:
+    msb: 0x04  # ✅ From PDF: MGRP4
+    lsb: 0x03
+    description: "Mute Group 4 - FX"
+
+  aux_send_level:
+    # AUX Monitor Level - using Main LR to Out1 level control
+    # For proper AUX control, you'll need to map specific input to output
+    # Example: Input 1 to Out1 would be MSB:4E LSB:44
+    msb: 0x4F  # Output level parameter
+    lsb: 0x01  # Out1
+    description: "AUX Send Level Control (Out1)"
+
+# Button Behaviors
+behaviors:
+  recording:
+    type: "toggle"
+    values:
+      off: 0
+      on: 127
+
+  aux_monitor:
+    type: "toggle"
+    preset_levels:
+      low: 50   # Adjust to your preference (0-127)
+      high: 100 # Adjust to your preference (0-127)
+
+  fx_mute:
+    type: "toggle"
+    mute_group: 4  # Group 4 = FX
+    values:
+      off: 0   # Unmuted (FX active)
+      on: 127  # Muted (FX off)
+
+  break_mode:
+    type: "toggle"
+    # BREAK MODE ACTIVE = Play break music only
+    # Use case: Band on break, break music playing
+    active_state:
+      mute_groups: [1, 2, 4]    # Mute: Vocals, Instruments, FX
+      unmute_groups: [3]        # Unmute: Break Music (ST2 In)
+
+    # BREAK MODE INACTIVE = Normal performance
+    # Use case: Live performance with vocals and instruments
+    inactive_state:
+      mute_groups: [3]          # Mute: Break Music (ST2 In)
+      unmute_groups: [1, 2, 4]  # Unmute: Vocals, Instruments, FX
+
+# Logging Configuration
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format: "%(asctime)s - %(levelname)s - %(message)s"
+  file: ""  # Leave empty for console only, or: "/var/log/cq-footcontroller.log"
+  max_file_size: 10485760  # 10MB
+  backup_count: 3
+
+# Advanced Settings (rarely need to change)
+advanced:
+  midi_channel: 0  # MIDI channel (0-15, where 0 = channel 1)
+  nrpn_send_delay: 0.01  # Delay between NRPN messages (seconds)
+  buffer_flush: true  # Flush TCP buffer after each message
