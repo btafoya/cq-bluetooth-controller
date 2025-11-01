@@ -6,11 +6,20 @@
 
 # Network Configuration
 network:
-  mixer_ip: "192.168.1.100"  # ⚠️ CHANGE THIS to your CQ-20B IP address!
-  mixer_port: 51325          # Standard MIDI over TCP port for Allen & Heath
-  keepalive_interval: 0.3    # Send keepalive every 300ms
-  connection_timeout: 5.0    # Connection timeout in seconds
-  reconnect_delay: 2.0       # Wait 2s before reconnecting after failure
+  # mixer_ip: "192.168.1.100"  # Optional: Set fixed IP to disable auto-discovery
+  mixer_port: 51325             # Standard MIDI over TCP port for Allen & Heath
+  keepalive_interval: 0.3       # Send keepalive every 300ms
+  connection_timeout: 5.0       # Connection timeout in seconds
+  reconnect_delay: 2.0          # Wait 2s before reconnecting after failure
+
+  # Auto-Discovery Configuration
+  # Automatically finds CQ-20B on network by scanning for port 51325
+  auto_discovery:
+    enabled: true               # Enable automatic mixer discovery
+    scan_interval: 300          # Full network scan every 300s (5 minutes)
+    check_interval: 30          # Quick check of last IP every 30s
+    subnet: "auto"              # Auto-detect subnet, or specify: "192.168.1.0/24"
+    timeout: 1.0                # Port scan timeout per IP (seconds)
 
 # Bluetooth MIDI Configuration
 bluetooth:

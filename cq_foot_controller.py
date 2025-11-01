@@ -11,8 +11,10 @@ import threading
 import logging
 import yaml
 import sys
+import ipaddress
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================
 # CONFIGURATION LOADER
@@ -91,14 +93,198 @@ def build_nrpn(param_msb, param_lsb, value_msb, value_lsb, channel=0):
     ]
 
 # ============================================
+# MIXER AUTO-DISCOVERY
+# ============================================
+class MixerDiscovery:
+    """Automatic network discovery for CQ-20B mixer"""
+
+    def __init__(self, config):
+        self.config = config
+        self.port = config.get('network', 'mixer_port', default=51325)
+
+        # Auto-discovery settings
+        auto_config = config.get('network', 'auto_discovery')
+        if auto_config:
+            self.enabled = auto_config.get('enabled', True)
+            self.scan_interval = auto_config.get('scan_interval', 300)  # 5 minutes
+            self.check_interval = auto_config.get('check_interval', 30)  # 30 seconds
+            self.subnet = auto_config.get('subnet', 'auto')
+            self.timeout = auto_config.get('timeout', 1.0)
+        else:
+            # Defaults if auto_discovery not in config
+            self.enabled = True
+            self.scan_interval = 300
+            self.check_interval = 30
+            self.subnet = 'auto'
+            self.timeout = 1.0
+
+        self.last_ip = None
+        self.discovery_thread = None
+        self.stop_discovery = threading.Event()
+
+    def get_local_subnet(self):
+        """Auto-detect local subnet"""
+        try:
+            # Get local IP address
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+
+            # Assume /24 subnet
+            network = ipaddress.IPv4Network(f"{local_ip}/24", strict=False)
+            return str(network)
+        except Exception as e:
+            logging.warning(f"Could not auto-detect subnet: {e}. Using 192.168.1.0/24")
+            return "192.168.1.0/24"
+
+    def test_port(self, ip, timeout=1.0):
+        """Test if port is open on given IP"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            result = sock.connect_ex((str(ip), self.port))
+            sock.close()
+            return result == 0
+        except:
+            return False
+
+    def verify_mixer(self, ip):
+        """Verify this is actually a CQ-20B by testing MIDI keepalive"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(2.0)
+            sock.connect((str(ip), self.port))
+
+            # Send MIDI keepalive byte
+            sock.send(bytes([0xFE]))
+
+            # If connection stays open, it's likely a MIDI device
+            # (Non-MIDI services would typically close or respond differently)
+            time.sleep(0.5)
+            sock.close()
+            return True
+        except:
+            return False
+
+    def scan_network(self):
+        """Scan network for mixer on port 51325"""
+        subnet = self.subnet if self.subnet != 'auto' else self.get_local_subnet()
+        logging.info(f"🔍 Scanning network {subnet} for CQ-20B mixer on port {self.port}...")
+
+        try:
+            network = ipaddress.IPv4Network(subnet, strict=False)
+            candidates = []
+
+            # Parallel port scanning for speed
+            with ThreadPoolExecutor(max_workers=20) as executor:
+                futures = {
+                    executor.submit(self.test_port, str(ip), self.timeout): str(ip)
+                    for ip in network.hosts()
+                }
+
+                for future in as_completed(futures):
+                    ip = futures[future]
+                    if future.result():
+                        candidates.append(ip)
+                        logging.info(f"  Found port {self.port} open on {ip}")
+
+            # Verify candidates are actually MIDI devices
+            for ip in candidates:
+                if self.verify_mixer(ip):
+                    logging.info(f"✓ Found CQ-20B mixer at {ip}")
+                    return ip
+                else:
+                    logging.debug(f"  {ip}:{self.port} open but not responding to MIDI")
+
+            logging.warning(f"⚠ No CQ-20B mixer found on network {subnet}")
+            return None
+
+        except Exception as e:
+            logging.error(f"Network scan error: {e}")
+            return None
+
+    def find_mixer(self):
+        """Find mixer: check last IP first, then full scan"""
+        # Fast path: try last known IP
+        if self.last_ip:
+            logging.info(f"🔍 Checking last known IP: {self.last_ip}")
+            if self.test_port(self.last_ip, timeout=2.0):
+                if self.verify_mixer(self.last_ip):
+                    logging.info(f"✓ Mixer still at {self.last_ip}")
+                    return self.last_ip
+                else:
+                    logging.warning(f"⚠ Port open at {self.last_ip} but not responding to MIDI")
+
+        # Full network scan
+        mixer_ip = self.scan_network()
+        if mixer_ip:
+            self.last_ip = mixer_ip
+        return mixer_ip
+
+    def monitor_loop(self, connection_callback):
+        """Background monitoring loop with periodic scanning"""
+        next_full_scan = time.time() + self.scan_interval
+
+        while not self.stop_discovery.is_set():
+            try:
+                # Quick check of last known IP
+                if self.last_ip:
+                    if not self.test_port(self.last_ip, timeout=2.0):
+                        logging.warning(f"⚠ Lost connection to mixer at {self.last_ip}")
+                        self.last_ip = None
+                        # Trigger immediate full scan
+                        next_full_scan = time.time()
+
+                # Periodic full scan
+                if time.time() >= next_full_scan:
+                    mixer_ip = self.scan_network()
+                    if mixer_ip and mixer_ip != self.last_ip:
+                        logging.info(f"🔄 Mixer IP changed: {self.last_ip} → {mixer_ip}")
+                        self.last_ip = mixer_ip
+                        # Notify connection to reconnect
+                        if connection_callback:
+                            connection_callback(mixer_ip)
+                    next_full_scan = time.time() + self.scan_interval
+
+                # Sleep until next check
+                self.stop_discovery.wait(self.check_interval)
+
+            except Exception as e:
+                logging.error(f"Discovery monitor error: {e}")
+                self.stop_discovery.wait(self.check_interval)
+
+    def start_monitoring(self, connection_callback=None):
+        """Start background discovery monitoring"""
+        if self.discovery_thread and self.discovery_thread.is_alive():
+            return
+
+        self.stop_discovery.clear()
+        self.discovery_thread = threading.Thread(
+            target=self.monitor_loop,
+            args=(connection_callback,),
+            daemon=True
+        )
+        self.discovery_thread.start()
+        logging.info("✓ Discovery monitoring started")
+
+    def stop_monitoring(self):
+        """Stop background discovery monitoring"""
+        self.stop_discovery.set()
+        if self.discovery_thread:
+            self.discovery_thread.join(timeout=5.0)
+        logging.info("✓ Discovery monitoring stopped")
+
+# ============================================
 # TCP CONNECTION TO CQ-20B
 # ============================================
 class CQConnection:
     """Manages TCP connection to CQ-20B mixer"""
 
-    def __init__(self, config):
+    def __init__(self, config, discovery=None):
         self.config = config
-        self.ip = config.get('network', 'mixer_ip')
+        self.discovery = discovery
+        self.ip = config.get('network', 'mixer_ip')  # Optional with auto-discovery
         self.port = config.get('network', 'mixer_port')
         self.keepalive_interval = config.get('network', 'keepalive_interval', default=0.3)
         self.connection_timeout = config.get('network', 'connection_timeout', default=5.0)
@@ -112,10 +298,28 @@ class CQConnection:
         self.keepalive_thread = None
         self.reconnecting = False
 
+    def on_discovery_update(self, new_ip):
+        """Callback when discovery finds mixer at new IP"""
+        if new_ip != self.ip:
+            logging.info(f"🔄 Discovery found mixer at new IP: {new_ip}")
+            self.ip = new_ip
+            # Trigger reconnect if currently connected to old IP
+            if self.connected:
+                self.reconnect()
+
     def connect(self):
-        """Connect to CQ-20B with auto-retry"""
+        """Connect to CQ-20B with auto-retry and auto-discovery"""
         while not self.connected:
             try:
+                # Use discovery if IP not set
+                if not self.ip and self.discovery:
+                    logging.info("🔍 No mixer IP configured, using auto-discovery...")
+                    self.ip = self.discovery.find_mixer()
+                    if not self.ip:
+                        logging.warning("⚠ Auto-discovery found no mixer. Retrying in 10s...")
+                        time.sleep(10)
+                        continue
+
                 logging.info(f"Connecting to CQ-20B at {self.ip}:{self.port}")
                 self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 self.socket.settimeout(self.connection_timeout)
@@ -128,6 +332,10 @@ class CQConnection:
                 if self.keepalive_thread is None or not self.keepalive_thread.is_alive():
                     self.keepalive_thread = threading.Thread(target=self._keepalive, daemon=True)
                     self.keepalive_thread.start()
+
+                # Start discovery monitoring if enabled
+                if self.discovery and not self.discovery.discovery_thread:
+                    self.discovery.start_monitoring(self.on_discovery_update)
 
             except Exception as e:
                 logging.error(f"Connection failed: {e}. Retrying in {self.reconnect_delay}s...")
@@ -410,11 +618,23 @@ def main():
     logging.info("CQ-20B Bluetooth Foot Controller Bridge")
     logging.info("=" * 60)
     logging.info(f"Config file: {config.config_path.absolute()}")
-    logging.info(f"Mixer: {config.get('network', 'mixer_ip')}:{config.get('network', 'mixer_port')}")
+
+    # Setup auto-discovery if enabled
+    mixer_ip = config.get('network', 'mixer_ip')
+    auto_discovery_config = config.get('network', 'auto_discovery')
+    use_discovery = (auto_discovery_config and auto_discovery_config.get('enabled', True)) or not mixer_ip
+
+    if use_discovery:
+        logging.info("Auto-discovery: ENABLED")
+        discovery = MixerDiscovery(config)
+    else:
+        logging.info(f"Mixer: {mixer_ip}:{config.get('network', 'mixer_port')}")
+        discovery = None
+
     logging.info("=" * 60)
 
     # Connect to CQ-20B
-    cq = CQConnection(config)
+    cq = CQConnection(config, discovery=discovery)
     cq.connect()
 
     # Setup button handlers

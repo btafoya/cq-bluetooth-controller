@@ -134,18 +134,38 @@ sudo systemctl status cq-footcontroller.service
 
 All settings in `config.yaml`:
 
+### ✨ Auto-Discovery (NEW!)
+
+The controller now automatically finds your CQ-20B on the network - **no IP configuration needed!**
+
 ```yaml
 network:
-  mixer_ip: "192.168.1.100"  # YOUR CQ-20B IP
-  mixer_port: 51325
+  # mixer_ip: "192.168.1.100"  # Optional: Uncomment to disable auto-discovery
+  auto_discovery:
+    enabled: true               # Automatic mixer discovery
+    scan_interval: 300          # Full scan every 5 minutes
+    check_interval: 30          # Quick check every 30 seconds
+    subnet: "auto"              # Auto-detect or specify: "192.168.1.0/24"
+```
 
+**How it works:**
+- Scans your local network for devices with port 51325 open
+- Verifies it's a MIDI device by testing keepalive response
+- Continuously monitors and auto-reconnects if mixer IP changes
+- Handles DHCP changes seamlessly
+
+**To use fixed IP instead:** Uncomment `mixer_ip` in config.yaml
+
+### Other Configuration
+
+```yaml
 button_mapping:
   button_a:
-    cc_number: 20  # Check your M-Vave
+    cc_number: 20  # Discover with ./test_midi.py
   # ... etc
 
 nrpn_addresses:
-  # ✅ Already configured with correct values
+  # ✅ Already configured with correct values from CQ MIDI Protocol
   recording:
     soft_key_note: 0x30  # Soft Key #1 (C3)
   mute_group_1:
